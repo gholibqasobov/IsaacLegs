@@ -16,6 +16,7 @@ setup(
         # via ament_index_python regardless of where ``ros2 run`` is invoked from.
         (f'share/{package_name}/policy/g1_locomotion',
             glob('policy/g1_locomotion/*')),
+        (f'share/{package_name}/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +31,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'policy_controller = fullbody_controller.policy_controller:main',
         ],
     },
 )
