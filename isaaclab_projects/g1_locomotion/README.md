@@ -29,7 +29,7 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
     - Listing the available tasks:
 
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
+        Note: It the task name changes, it may be necessary to update the search pattern `"IsaacLegs-"`
         (in the `scripts/list_envs.py` file) so that it can be listed.
 
         ```bash
