@@ -248,16 +248,36 @@ def main(
     pos_by_name = dict(zip(yaml_names, robot["default_joint_pos"]))  # radians (Isaac Lab)
 
     # ---- effort limits from env.yaml actuator groups (regex -> joints) ----
+    # Isaac Lab actuator configs use one of: ``effort_limit_sim`` (PhysX-side, preferred)
+    # or ``effort_limit`` (actuator-model side). Either may be a scalar OR a dict of
+    # joint-regex -> value. When ``effort_limit_sim`` is None we fall back to
+    # ``effort_limit`` (matches PhysX's behavior when no sim override is given).
     with open(env_yaml_path) as f:
         env = yaml.load(f, Loader=_IsaacLabLoader)
     actuators = env["scene"]["robot"]["actuators"]
     eff_by_name = {}
-    for group in actuators.values():
-        eff = float(group["effort_limit_sim"])
+    for group_name, group in actuators.items():
+        eff = group.get("effort_limit_sim")
+        if eff is None:
+            eff = group.get("effort_limit")
+        if eff is None:
+            raise RuntimeError(
+                f"actuator group '{group_name}' has no effort_limit / effort_limit_sim "
+                f"in {env_yaml_path}; cannot derive a per-joint effort limit.")
         for pattern in group["joint_names_expr"]:
             for n in yaml_names:
-                if re.fullmatch(pattern, n):
-                    eff_by_name[n] = eff
+                if not re.fullmatch(pattern, n):
+                    continue
+                if isinstance(eff, dict):
+                    # dict form: keys are joint-name regexes, values are per-joint limits
+                    val = next((v for p, v in eff.items() if re.fullmatch(p, n)), None)
+                    if val is None:
+                        raise RuntimeError(
+                            f"joint '{n}' matched group '{group_name}' but no entry in its "
+                            f"effort_limit dict {list(eff.keys())} matches it.")
+                    eff_by_name[n] = float(val)
+                else:
+                    eff_by_name[n] = float(eff)
 
     # ---- optionally add the angular Drive / JointState schemas + init pose ----
     if apply_physics_schemas:
