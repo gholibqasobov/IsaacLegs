@@ -34,6 +34,9 @@ setup(
     entry_points={
         'console_scripts': [
             'policy_controller = fullbody_controller.policy_controller:main',
+            # G1-only reference controller (hardcoded obs layout, pre-modular).
+            # Kept as a known-good baseline; use ``policy_controller`` for any new robot.
+            'g1_policy_controller = fullbody_controller.g1_policy_controller:main',
         ],
     },
 )
