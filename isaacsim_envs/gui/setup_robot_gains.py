@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Configure G1 joint drives for policy deployment from the trained YAMLs.
+"""Configure a robot's joint drives for policy deployment from the trained YAMLs.
 
-Run this inside Isaac Sim (Script Editor or an extension) after the G1 is on the
-stage. It replaces hardcoded kp/kd/effort numbers by reading them straight from
-the files Isaac Lab exported alongside the policy:
+Run this inside Isaac Sim (Script Editor or an extension) after the robot is on
+the stage. It replaces hardcoded kp/kd/effort numbers by reading them straight
+from the files Isaac Lab exported alongside the policy:
 
   * ``IO_descriptors.yaml`` -> per-joint ``default_joint_stiffness`` (kp),
     ``default_joint_damping`` (kd) and ``default_joint_armature`` (already
@@ -21,23 +21,43 @@ It also (optionally) applies the USD schemas equivalent to the Stage panel's
 so that ``set_gains(save_to_usd=True)`` has somewhere to write. The numeric
 gains are written by Isaac core's ``set_gains`` (SI/radians); we never hand-author
 the per-degree PhysX drive values.
+
+Usage (Isaac Sim Script Editor)::
+
+    # G1 (defaults, no args needed)
+    from setup_robot_gains import main; main()
+
+    # Go2 (or any other robot whose policy is shipped in the same package)
+    import os
+    from setup_robot_gains import main, _REPO_ROOT
+    main(
+        robot_prim="/World/go2",
+        policy_dir=os.path.join(
+            _REPO_ROOT, "src", "fullbody_controller", "policy", "go2_locomotion"),
+    )
+
+Usage (CLI, e.g. headless / launch script)::
+
+    python setup_robot_gains.py \\
+        --robot-prim /World/go2 \\
+        --policy-dir src/fullbody_controller/policy/go2_locomotion
 """
 
+import os
 import re
 
 import numpy as np
 import yaml
 from isaacsim.core.prims import SingleArticulation
 
-# ---- config ------------------------------------------------------------------
-ROBOT_PRIM = "/World/g1"  # articulation-root prim path (check the Stage panel)
-
-# point these at the files shipped with the ROS package (or the install/share copy)
-IO_DESC = "/home/qasob/IsaacLegs/src/fullbody_controller/policy/g1_locomotion/IO_descriptors.yaml"
-ENV_YAML = "/home/qasob/IsaacLegs/src/fullbody_controller/policy/g1_locomotion/env.yaml"
-
-# apply the angular DriveAPI / JointStateAPI schemas before writing gains
-APPLY_PHYSICS_SCHEMAS = True
+# ---- defaults (G1) -----------------------------------------------------------
+# These keep the script a no-arg ``main()`` call for the original G1 use case.
+# G1_POLICY_DIR is resolved relative to this file so the repo is portable
+# (script at <repo>/isaacsim_envs/gui/, policies at <repo>/src/fullbody_controller/policy/).
+G1_ROBOT_PRIM = "/World/g1"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+G1_POLICY_DIR = os.path.join(
+    _REPO_ROOT, "src", "fullbody_controller", "policy", "g1_locomotion")
 
 
 class _IsaacLabLoader(yaml.SafeLoader):
@@ -91,10 +111,27 @@ def _apply_angular_schemas(robot_prim_path: str, default_pos_rad: dict) -> None:
                 state.CreatePositionAttr().Set(pos_deg)
 
 
-def main() -> None:
-    """Read the YAMLs and write per-joint gains/efforts/armature onto the robot."""
+def main(
+    robot_prim: str = G1_ROBOT_PRIM,
+    policy_dir: str = G1_POLICY_DIR,
+    apply_physics_schemas: bool = True,
+) -> None:
+    """Read the YAMLs and write per-joint gains/efforts/armature onto the robot.
+
+    Args:
+        robot_prim: USD path to the articulation root (e.g. ``/World/g1``,
+            ``/World/go2``). Check the Stage panel to confirm.
+        policy_dir: Directory containing ``IO_descriptors.yaml`` and
+            ``env.yaml`` (the pair Isaac Lab exports next to ``policy.pt``).
+        apply_physics_schemas: If True, also apply the angular DriveAPI /
+            JointStateAPI schemas to every revolute joint and seed the init
+            pose. Safe no-op on USDs where those schemas already exist.
+    """
+    io_desc_path = os.path.join(policy_dir, "IO_descriptors.yaml")
+    env_yaml_path = os.path.join(policy_dir, "env.yaml")
+
     # ---- per-joint kp/kd/armature (already flattened, in joint_names order) ----
-    with open(IO_DESC) as f:
+    with open(io_desc_path) as f:
         desc = yaml.safe_load(f)
     robot = desc["articulations"]["robot"]
     yaml_names = robot["joint_names"]
@@ -104,7 +141,7 @@ def main() -> None:
     pos_by_name = dict(zip(yaml_names, robot["default_joint_pos"]))  # radians (Isaac Lab)
 
     # ---- effort limits from env.yaml actuator groups (regex -> joints) ----
-    with open(ENV_YAML) as f:
+    with open(env_yaml_path) as f:
         env = yaml.load(f, Loader=_IsaacLabLoader)
     actuators = env["scene"]["robot"]["actuators"]
     eff_by_name = {}
@@ -116,11 +153,11 @@ def main() -> None:
                     eff_by_name[n] = eff
 
     # ---- optionally add the angular Drive / JointState schemas + init pose ----
-    if APPLY_PHYSICS_SCHEMAS:
-        _apply_angular_schemas(ROBOT_PRIM, pos_by_name)
+    if apply_physics_schemas:
+        _apply_angular_schemas(robot_prim, pos_by_name)
 
     # ---- build arrays in the articulation's ACTUAL dof order (map by name!) ----
-    art = SingleArticulation(ROBOT_PRIM)
+    art = SingleArticulation(robot_prim)
     art.initialize()
     names = art.dof_names
 
@@ -144,4 +181,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--robot-prim", default=G1_ROBOT_PRIM,
+                        help=f"articulation-root prim path (default: {G1_ROBOT_PRIM})")
+    parser.add_argument("--policy-dir", default=G1_POLICY_DIR,
+                        help="directory containing IO_descriptors.yaml + env.yaml "
+                             f"(default: {G1_POLICY_DIR})")
+    parser.add_argument("--no-physics-schemas", action="store_true",
+                        help="skip applying angular Drive / JointState schemas")
+    args = parser.parse_args()
+    main(
+        robot_prim=args.robot_prim,
+        policy_dir=args.policy_dir,
+        apply_physics_schemas=not args.no_physics_schemas,
+    )
