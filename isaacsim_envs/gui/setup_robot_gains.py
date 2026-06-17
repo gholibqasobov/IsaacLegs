@@ -12,52 +12,55 @@ from the files Isaac Lab exported alongside the policy:
     which is NOT present in IO_descriptors and must be expanded from the
     actuator group regexes.
 
-Everything is mapped by joint NAME, because the articulation's DOF order
-(``art.dof_names``) generally differs from the YAML ``joint_names`` order.
-
 It also (optionally) applies the USD schemas equivalent to the Stage panel's
   Add -> Physics -> Angular Drive        (UsdPhysics.DriveAPI, "angular")
   Add -> Physics -> Joint State (angular) (PhysxSchema.JointStateAPI, "angular")
-so that ``set_gains(save_to_usd=True)`` has somewhere to write. The numeric
-gains are written by Isaac core's ``set_gains`` (SI/radians); we never hand-author
-the per-degree PhysX drive values.
+so that ``set_gains(save_to_usd=True)`` has somewhere to write.
 
-Usage (Isaac Sim Script Editor)::
+----------------------------------------------------------------------
+How to choose the robot/policy (Script Editor cannot pass CLI args):
+----------------------------------------------------------------------
+From a terminal, persist your selection once::
 
-    # G1 (defaults, no args needed)
-    from setup_robot_gains import main; main()
+    python setup_robot_gains.py <policy_dir> <robot_prim>
+    python setup_robot_gains.py /path/to/policy/go2_locomotion /go2
 
-    # Go2 (or any other robot whose policy is shipped in the same package)
-    import os
-    from setup_robot_gains import main, _REPO_ROOT
-    main(
-        robot_prim="/World/go2",
-        policy_dir=os.path.join(
-            _REPO_ROOT, "src", "fullbody_controller", "policy", "go2_locomotion"),
-    )
+The robot_prim is normalized to ``/World/<name>`` (so ``/go2`` and ``go2``
+both become ``/World/go2``). The choice is written to
+``~/.isaaclegs_setup_gains.json`` and stays there until you run::
 
-Usage (CLI, e.g. headless / launch script)::
+    python setup_robot_gains.py clear
 
-    python setup_robot_gains.py \\
-        --robot-prim /World/go2 \\
-        --policy-dir src/fullbody_controller/policy/go2_locomotion
+In Isaac Sim, open this file in the Script Editor and click Run. ``main()``
+reads the sidecar and applies the gains. If no sidecar exists, it falls back
+to the built-in G1 defaults.
 """
 
+# ============================================================
+# Built-in defaults (used when no sidecar JSON is present).
+# ============================================================
+
+# G1 robot prim path on the stage.
+G1_ROBOT_PRIM = "/World/g1"
+
+# G1 policy directory, relative to the IsaacLegs repo root. The repo root is
+# auto-detected by walking upward looking for ``src/fullbody_controller/policy``.
+G1_POLICY_SUBDIR = "g1_locomotion"
+
+# Apply the angular Drive / JointState schemas before writing gains.
+APPLY_PHYSICS_SCHEMAS = True
+
+# ============================================================
+
+import json
 import os
 import re
 
 import numpy as np
 import yaml
-from isaacsim.core.prims import SingleArticulation
 
-# ---- defaults (G1) -----------------------------------------------------------
-# These keep the script a no-arg ``main()`` call for the original G1 use case.
-# G1_POLICY_DIR is resolved relative to this file so the repo is portable
-# (script at <repo>/isaacsim_envs/gui/, policies at <repo>/src/fullbody_controller/policy/).
-G1_ROBOT_PRIM = "/World/g1"
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-G1_POLICY_DIR = os.path.join(
-    _REPO_ROOT, "src", "fullbody_controller", "policy", "g1_locomotion")
+SIDECAR_PATH = os.path.expanduser("~/.isaaclegs_setup_gains.json")
+_MARKER = ("src", "fullbody_controller", "policy")
 
 
 class _IsaacLabLoader(yaml.SafeLoader):
@@ -84,12 +87,107 @@ _IsaacLabLoader.add_constructor("tag:yaml.org,2002:python/tuple", _construct_tup
 _IsaacLabLoader.add_multi_constructor("tag:yaml.org,2002:python/", _ignore_python_object)
 
 
+# ---- config helpers ---------------------------------------------------------
+
+
+def _normalize_prim(prim: str) -> str:
+    """Normalize a user-supplied robot prim path to ``/World/<name>``.
+
+    Examples: ``/go2`` -> ``/World/go2``; ``go2`` -> ``/World/go2``;
+    ``/World/go2`` -> unchanged.
+    """
+    if prim.startswith("/World/"):
+        return prim
+    return "/World/" + prim.lstrip("/")
+
+
+def _find_repo_root() -> str:
+    """Locate the IsaacLegs checkout by walking upward looking for ``src/fullbody_controller/policy``."""
+    candidates = []
+    try:
+        candidates.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass  # __file__ is undefined when the file's contents are pasted into Script Editor
+    candidates.append(os.getcwd())
+
+    for start in candidates:
+        cur = start
+        for _ in range(10):
+            if os.path.isdir(os.path.join(cur, *_MARKER)):
+                return cur
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+
+    raise RuntimeError(
+        "Could not locate the IsaacLegs repo root. Run the CLI once from a terminal "
+        "to write the sidecar with an explicit policy_dir:\n"
+        "  python setup_robot_gains.py <abs/path/to/policy_dir> <robot_prim>")
+
+
+def _resolve_config() -> dict:
+    """Read the sidecar JSON if present; otherwise fall back to G1 defaults."""
+    if os.path.isfile(SIDECAR_PATH):
+        try:
+            with open(SIDECAR_PATH) as f:
+                sidecar = json.load(f)
+            return {
+                "robot_prim": _normalize_prim(sidecar["robot_prim"]),
+                "policy_dir": os.path.abspath(os.path.expanduser(sidecar["policy_dir"])),
+                "apply_physics_schemas": bool(sidecar.get("apply_physics_schemas", True)),
+            }
+        except (OSError, json.JSONDecodeError, KeyError) as exc:
+            print(f"[setup_robot_gains] WARNING: bad sidecar at {SIDECAR_PATH}: {exc}. "
+                  "Falling back to built-in G1 defaults.")
+
+    return {
+        "robot_prim": G1_ROBOT_PRIM,
+        "policy_dir": os.path.join(_find_repo_root(), *_MARKER, G1_POLICY_SUBDIR),
+        "apply_physics_schemas": APPLY_PHYSICS_SCHEMAS,
+    }
+
+
+def _save_sidecar(policy_dir: str, robot_prim: str,
+                  apply_physics_schemas: bool = True) -> None:
+    """Persist the chosen policy_dir + robot_prim so the next Script Editor Run picks them up."""
+    abs_policy_dir = os.path.abspath(os.path.expanduser(policy_dir))
+    if not os.path.isdir(abs_policy_dir):
+        raise SystemExit(f"policy_dir does not exist: {abs_policy_dir}")
+    desc = os.path.join(abs_policy_dir, "IO_descriptors.yaml")
+    if not os.path.isfile(desc):
+        raise SystemExit(
+            f"IO_descriptors.yaml not found in {abs_policy_dir}. "
+            "Did you point at the right folder?")
+    payload = {
+        "policy_dir": abs_policy_dir,
+        "robot_prim": _normalize_prim(robot_prim),
+        "apply_physics_schemas": bool(apply_physics_schemas),
+    }
+    with open(SIDECAR_PATH, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Wrote {SIDECAR_PATH}:")
+    print(json.dumps(payload, indent=2))
+
+
+def _clear_sidecar() -> None:
+    """Remove the sidecar, reverting to the built-in G1 defaults."""
+    if os.path.isfile(SIDECAR_PATH):
+        os.remove(SIDECAR_PATH)
+        print(f"Removed {SIDECAR_PATH}")
+    else:
+        print(f"No sidecar at {SIDECAR_PATH} (nothing to remove).")
+
+
+# ---- physics / gains --------------------------------------------------------
+
+
 def _apply_angular_schemas(robot_prim_path: str, default_pos_rad: dict) -> None:
     """Apply angular DriveAPI + JointStateAPI to every revolute joint and seed the init pose.
 
     This is the scripted equivalent of the Stage panel context-menu items
     'Add -> Physics -> Angular Drive' and 'Add -> Physics -> Joint State (angular)'.
-    On the stock G1 USD these usually already exist, so this acts as a safety net.
+    On the stock G1/Go2 USDs these usually already exist, so this acts as a safety net.
 
     ``default_pos_rad`` maps joint name -> default position in RADIANS (Isaac Lab
     convention). USD angular joints are authored in DEGREES, so the value is
@@ -112,23 +210,32 @@ def _apply_angular_schemas(robot_prim_path: str, default_pos_rad: dict) -> None:
 
 
 def main(
-    robot_prim: str = G1_ROBOT_PRIM,
-    policy_dir: str = G1_POLICY_DIR,
-    apply_physics_schemas: bool = True,
+    robot_prim: str = None,
+    policy_dir: str = None,
+    apply_physics_schemas: bool = None,
 ) -> None:
     """Read the YAMLs and write per-joint gains/efforts/armature onto the robot.
 
-    Args:
-        robot_prim: USD path to the articulation root (e.g. ``/World/g1``,
-            ``/World/go2``). Check the Stage panel to confirm.
-        policy_dir: Directory containing ``IO_descriptors.yaml`` and
-            ``env.yaml`` (the pair Isaac Lab exports next to ``policy.pt``).
-        apply_physics_schemas: If True, also apply the angular DriveAPI /
-            JointStateAPI schemas to every revolute joint and seed the init
-            pose. Safe no-op on USDs where those schemas already exist.
+    Any argument left as ``None`` is resolved from the sidecar JSON or the
+    built-in G1 defaults.
     """
+    # Lazy import so the sidecar helpers work outside Isaac Sim.
+    from isaacsim.core.prims import SingleArticulation
+
+    cfg = _resolve_config()
+    if robot_prim is None:
+        robot_prim = cfg["robot_prim"]
+    else:
+        robot_prim = _normalize_prim(robot_prim)
+    if policy_dir is None:
+        policy_dir = cfg["policy_dir"]
+    if apply_physics_schemas is None:
+        apply_physics_schemas = cfg["apply_physics_schemas"]
+
     io_desc_path = os.path.join(policy_dir, "IO_descriptors.yaml")
     env_yaml_path = os.path.join(policy_dir, "env.yaml")
+    print(f"[setup_robot_gains] robot_prim = {robot_prim}")
+    print(f"[setup_robot_gains] policy_dir = {policy_dir}")
 
     # ---- per-joint kp/kd/armature (already flattened, in joint_names order) ----
     with open(io_desc_path) as f:
@@ -181,19 +288,27 @@ def main(
 
 
 if __name__ == "__main__":
-    import argparse
+    import sys
 
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--robot-prim", default=G1_ROBOT_PRIM,
-                        help=f"articulation-root prim path (default: {G1_ROBOT_PRIM})")
-    parser.add_argument("--policy-dir", default=G1_POLICY_DIR,
-                        help="directory containing IO_descriptors.yaml + env.yaml "
-                             f"(default: {G1_POLICY_DIR})")
-    parser.add_argument("--no-physics-schemas", action="store_true",
-                        help="skip applying angular Drive / JointState schemas")
-    args = parser.parse_args()
-    main(
-        robot_prim=args.robot_prim,
-        policy_dir=args.policy_dir,
-        apply_physics_schemas=not args.no_physics_schemas,
-    )
+    args = sys.argv[1:]
+    positional = [a for a in args if not a.startswith("-")]
+    no_schemas = "--no-physics-schemas" in args
+
+    if positional == ["clear"]:
+        _clear_sidecar()
+    elif len(positional) == 2:
+        # CLI: python setup_robot_gains.py <policy_dir> <robot_prim> [--no-physics-schemas]
+        _save_sidecar(
+            policy_dir=positional[0],
+            robot_prim=positional[1],
+            apply_physics_schemas=not no_schemas,
+        )
+    elif not args:
+        # Script Editor "Run": no args -> apply gains using the sidecar / defaults.
+        main()
+    else:
+        raise SystemExit(
+            "Usage:\n"
+            "  python setup_robot_gains.py <policy_dir> <robot_prim> [--no-physics-schemas]\n"
+            "  python setup_robot_gains.py clear\n"
+            "  (or open this file in the Isaac Sim Script Editor and click Run)")
