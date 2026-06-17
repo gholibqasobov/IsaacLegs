@@ -15,18 +15,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ROS 2 controller that runs the trained policy in Isaac Sim.
+"""ROS 2 controller that runs a trained Isaac Lab policy.
 
 * control rate = 50 Hz.
 
-The exact joint order, default positions and action scaling are loaded from Isaac Lab's
-``IO_descriptors.yaml`` (produced when the env is trained/exported with
-``export_io_descriptors=True``), 
+The exact joint order, default positions, action scaling and per-term observation layout
+are loaded from Isaac Lab's ``IO_descriptors.yaml`` (produced when the env is trained or
+exported with ``export_io_descriptors=True``), so this node is robot-agnostic for any
+policy whose observation terms are listed in ``OBS_PRODUCERS`` below.
 """
 
 import io
 import os
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import rclpy
@@ -42,6 +44,28 @@ from sensor_msgs.msg import Imu, JointState
 
 class FullbodyController(Node):
     """Run policy: subscribe to robot state, publish joint position targets."""
+
+    # ---- observation producer registry ---------------------------------------------------------
+    # Maps an IO-descriptor term name -> the name of an instance method that returns that term's
+    # 1-D slice of the observation vector. The dispatch loop in ``_compute_observation`` walks
+    # ``self.obs_terms`` in order, calls the producer for each, and concatenates.
+    #
+    # To add a new term:
+    #   1. If it is derivable from /joint_states + /imu + /odom + /cmd_vel only, write an
+    #      ``_obs_<name>(self, ctx)`` method and add it here.
+    #   2. If it needs a new topic, also: declare a launch param for the topic name, create the
+    #      subscription in ``__init__`` (gate it with ``if 'your_term' in self._obs_term_names``),
+    #      cache the latest message on ``self``, and have the producer read from the cache.
+    # Unknown term names fail fast at startup with the available registry keys in the error.
+    OBS_PRODUCERS = {
+        "base_lin_vel":       "_obs_base_lin_vel",
+        "base_ang_vel":       "_obs_base_ang_vel",
+        "projected_gravity":  "_obs_projected_gravity",
+        "generated_commands": "_obs_generated_commands",
+        "joint_pos_rel":      "_obs_joint_pos_rel",
+        "joint_vel_rel":      "_obs_joint_vel_rel",
+        "last_action":        "_obs_last_action",
+    }
 
     def __init__(self):
         """Initialize the FullbodyController node."""
@@ -176,11 +200,32 @@ class FullbodyController(Node):
         policy_obs = obs_groups.get('policy')
         if not policy_obs:
             raise ValueError(f"No 'observations.policy' group found in {desc_path}.")
-        self.obs_dim = sum(int(term['shape'][0]) for term in policy_obs)
+
+        self.obs_terms = []
+        for term in policy_obs:
+            name = term['name']
+            shape = list(term['shape'])
+            history_length = int((term.get('overloads') or {}).get('history_length', 0))
+            if history_length > 0:
+                raise NotImplementedError(
+                    f"observation term '{name}' uses history_length={history_length}; this "
+                    "controller does not implement history buffering yet. Add a ring buffer "
+                    "on self and produce the flattened history from the producer to support it.")
+            if name not in self.OBS_PRODUCERS:
+                raise RuntimeError(
+                    f"No observation producer registered for term '{name}' "
+                    f"(descriptor: {desc_path}). Known terms: {sorted(self.OBS_PRODUCERS)}. "
+                    "Add a producer method and an OBS_PRODUCERS entry, or fix the descriptor.")
+            self.obs_terms.append({'name': name, 'shape': shape, 'history_length': history_length})
+
+        self._obs_term_names = {t['name'] for t in self.obs_terms}
+        self.obs_dim = sum(int(t['shape'][0]) for t in self.obs_terms)
 
         # map a joint name -> its index in the policy's observation/action order
         self._name_to_policy_idx = {name: i for i, name in enumerate(self.joint_names)}
-        self._logger.info(f"Loaded IO descriptors from {desc_path}")
+        self._logger.info(
+            f"Loaded IO descriptors from {desc_path}: "
+            f"obs terms = {[t['name'] for t in self.obs_terms]}")
 
     # ---- callbacks ---------------------------------------------------------------------------------
 
@@ -225,7 +270,7 @@ class FullbodyController(Node):
         self._publish(self.default_pos + self.action * self.action_scale)
 
     def _publish(self, positions: np.ndarray):
-        """Publish a 37-joint position target in policy order."""
+        """Publish a joint-position target in the policy's joint order."""
         self._joint_command.header.stamp = self.get_clock().now().to_msg()
         self._joint_command.name = self.joint_names
         self._joint_command.position = positions.tolist()
@@ -244,8 +289,8 @@ class FullbodyController(Node):
 
     # ---- policy ------------------------------------------------------------------------------------
 
-    def _compute_observation(self, joint_state: JointState, imu: Imu) -> np.ndarray:
-        """Assemble the observation in the exact training order (body frame)."""
+    def _build_obs_ctx(self, joint_state: JointState, imu: Imu) -> SimpleNamespace:
+        """Pre-compute everything the observation producers need from the sync'd inputs."""
         # body orientation: quat_to_rot gives R_WB (body->world); transpose -> R_BW (world->body)
         quat_I = imu.orientation
         quat_array = np.array([quat_I.w, quat_I.x, quat_I.y, quat_I.z])
@@ -257,9 +302,11 @@ class FullbodyController(Node):
         else:
             lin_vel_b = np.matmul(R_BW, self._odom_lin_vel_w)  # rotate world -> body
 
-        ang_vel_b = np.array([imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z])
+        ang_vel_b = np.array(
+            [imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z])
         gravity_b = np.matmul(R_BW, np.array([0.0, 0.0, -1.0]))
-        cmd_vel = np.array([self._cmd_vel.linear.x, self._cmd_vel.linear.y, self._cmd_vel.angular.z])
+        cmd_vel = np.array(
+            [self._cmd_vel.linear.x, self._cmd_vel.linear.y, self._cmd_vel.angular.z])
 
         # map incoming joint_states (any order) into the policy's joint order
         joint_pos = self._map_joint_pos(joint_state)
@@ -269,16 +316,48 @@ class FullbodyController(Node):
             if dst is not None and src_idx < len(joint_state.velocity):
                 joint_vel[dst] = joint_state.velocity[src_idx]
 
-        obs = np.zeros(self.obs_dim)
-        n = self.num_joints
-        obs[0:3] = lin_vel_b
-        obs[3:6] = ang_vel_b
-        obs[6:9] = gravity_b
-        obs[9:12] = cmd_vel
-        obs[12:12 + n] = joint_pos - self.default_pos
-        obs[12 + n:12 + 2 * n] = joint_vel
-        obs[12 + 2 * n:12 + 3 * n] = self._previous_action
-        return obs
+        return SimpleNamespace(
+            R_BW=R_BW, lin_vel_b=lin_vel_b, ang_vel_b=ang_vel_b, gravity_b=gravity_b,
+            cmd_vel=cmd_vel, joint_pos=joint_pos, joint_vel=joint_vel,
+        )
+
+    def _compute_observation(self, joint_state: JointState, imu: Imu) -> np.ndarray:
+        """Assemble the observation in the descriptor's term order via OBS_PRODUCERS."""
+        ctx = self._build_obs_ctx(joint_state, imu)
+        parts = []
+        for term in self.obs_terms:
+            method = getattr(self, self.OBS_PRODUCERS[term['name']])
+            part = np.asarray(method(ctx), dtype=np.float64).reshape(-1)
+            expected = int(term['shape'][0])
+            if part.size != expected:
+                raise RuntimeError(
+                    f"observation producer '{term['name']}' returned {part.size} dims, "
+                    f"descriptor expected {expected}.")
+            parts.append(part)
+        return np.concatenate(parts) if parts else np.zeros(0)
+
+    # ---- observation producers (one per OBS_PRODUCERS entry) ---------------------------------------
+
+    def _obs_base_lin_vel(self, ctx):
+        return ctx.lin_vel_b
+
+    def _obs_base_ang_vel(self, ctx):
+        return ctx.ang_vel_b
+
+    def _obs_projected_gravity(self, ctx):
+        return ctx.gravity_b
+
+    def _obs_generated_commands(self, ctx):
+        return ctx.cmd_vel
+
+    def _obs_joint_pos_rel(self, ctx):
+        return ctx.joint_pos - self.default_pos
+
+    def _obs_joint_vel_rel(self, ctx):
+        return ctx.joint_vel
+
+    def _obs_last_action(self, ctx):
+        return self._previous_action
 
     def _compute_action(self, obs: np.ndarray) -> np.ndarray:
         """Run the policy network."""

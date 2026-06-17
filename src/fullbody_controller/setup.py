@@ -12,10 +12,12 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        # ship the trained policy + IO descriptors so the node can locate them at runtime
+        # ship the trained policies + IO descriptors so the node can locate them at runtime
         # via ament_index_python regardless of where ``ros2 run`` is invoked from.
         (f'share/{package_name}/policy/g1_locomotion',
             glob('policy/g1_locomotion/*')),
+        (f'share/{package_name}/policy/go2_locomotion',
+            glob('policy/go2_locomotion/*')),
         (f'share/{package_name}/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
