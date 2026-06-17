@@ -50,12 +50,10 @@ class FullbodyController(Node):
     # 1-D slice of the observation vector. The dispatch loop in ``_compute_observation`` walks
     # ``self.obs_terms`` in order, calls the producer for each, and concatenates.
     #
-    # To add a new term:
-    #   1. If it is derivable from /joint_states + /imu + /odom + /cmd_vel only, write an
-    #      ``_obs_<name>(self, ctx)`` method and add it here.
-    #   2. If it needs a new topic, also: declare a launch param for the topic name, create the
-    #      subscription in ``__init__`` (gate it with ``if 'your_term' in self._obs_term_names``),
-    #      cache the latest message on ``self``, and have the producer read from the cache.
+    # To add a new obs term:
+    #   1. Write an ``_obs_<name>(self, ctx)`` method that returns a 1-D np.ndarray.
+    #   2. Add the ``name -> method_name`` mapping below.
+    #   3. If the term needs a NEW topic, add a matching entry to TOPIC_SOURCES (see below).
     # Unknown term names fail fast at startup with the available registry keys in the error.
     OBS_PRODUCERS = {
         "base_lin_vel":       "_obs_base_lin_vel",
@@ -66,6 +64,66 @@ class FullbodyController(Node):
         "joint_vel_rel":      "_obs_joint_vel_rel",
         "last_action":        "_obs_last_action",
     }
+
+    # ---- topic source registry ----------------------------------------------------------------
+    # Declarative description of every ROS topic the controller can SUBSCRIBE to. ``__init__``
+    # walks this list to declare launch parameters, build the TimeSynchronizer that drives the
+    # control loop, and create the async subscriptions that feed obs producer caches.
+    #
+    # Async sources can be gated on which observation terms are present in the loaded IO
+    # descriptor (see ``feeds_terms``), so the controller stays silent about sensors a given
+    # policy does not consume.
+    #
+    # Fields:
+    #   "key"          str   - short identifier (also used in log messages)
+    #   "param"        str   - ROS parameter name for the topic (override with -p <param>:=...)
+    #   "default"      str   - default topic name; '' means "must be supplied by the user"
+    #   "msg_type"     class - ROS message type
+    #   "mode"         str   - "tick"  : TimeSynchronizer'd input driving ``_tick``. Only the
+    #                                    canonical joint_states + imu pair use this mode;
+    #                                    adding a third tick source requires editing _tick.
+    #                          "async" : cached by the named callback method, read by producers.
+    #   "callback"     str   - bound-method name handling each message (async only)
+    #   "qos"          str   - "sim" (RELIABLE/VOLATILE/KEEP_ALL for Isaac Sim) or
+    #                          "default" (depth-10 system default; good for low-rate commands)
+    #   "feeds_terms"  None  - always required (subscription always created), OR
+    #                  tuple - obs term names this source enables; subscription is skipped if
+    #                          none of these terms appear in the loaded descriptor.
+    #
+    # ---- TODO: to add a new sensor topic, copy the commented LiDAR template below ----
+    # Steps:
+    #   1. Import the message type at the top of this file.
+    #   2. Add an entry to TOPIC_SOURCES here (use a tuple in feeds_terms to enable gating).
+    #   3. Add a cache attribute (e.g. ``self._lidar_scan = None``) in ``_init_topic_caches``.
+    #   4. Add the callback method on this class (e.g. ``_lidar_callback``).
+    #   5. Add the obs producer method and an OBS_PRODUCERS entry (see above).
+    #   6. Launch with the topic name, e.g. ``ros2 launch ... lidar_topic:=/scan``.
+    TOPIC_SOURCES = [
+        {"key": "joint_states", "param": "joint_states_topic", "default": "joint_states",
+         "msg_type": JointState, "mode": "tick",  "qos": "sim",
+         "feeds_terms": None},
+        {"key": "imu",          "param": "imu_topic",          "default": "imu",
+         "msg_type": Imu,        "mode": "tick",  "qos": "sim",
+         "feeds_terms": None},
+        {"key": "odom",         "param": "odom_topic",         "default": "odom",
+         "msg_type": Odometry,   "mode": "async", "callback": "_odom_callback",
+         "qos": "sim",     "feeds_terms": None},
+        {"key": "cmd_vel",      "param": "cmd_vel_topic",      "default": "cmd_vel",
+         "msg_type": Twist,      "mode": "async", "callback": "_cmd_vel_callback",
+         "qos": "default", "feeds_terms": None},
+        # TODO -- LiDAR extension template. Uncomment + complete steps 1, 3, 4, 5 above.
+        # {"key": "lidar",      "param": "lidar_topic",        "default": "",
+        #  "msg_type": LaserScan, "mode": "async", "callback": "_lidar_callback",
+        #  "qos": "default", "feeds_terms": ("lidar_scan",)},
+    ]
+
+    # ---- publisher registry -------------------------------------------------------------------
+    # Every topic the controller PUBLISHES to. ``__init__`` creates each publisher and stores it
+    # on the named attribute, so the runtime code can ``self._joint_publisher.publish(msg)``.
+    PUBLISHERS = [
+        {"key": "joint_command", "param": "joint_command_topic", "default": "joint_command",
+         "msg_type": JointState, "attr": "_joint_publisher", "qos": "sim"},
+    ]
 
     def __init__(self):
         """Initialize the FullbodyController node."""
@@ -92,12 +150,10 @@ class FullbodyController(Node):
         # nav_msgs/Odometry twist convention. REP-103 says twist is in the child (body) frame -> True.
         # If Isaac publishes the base velocity in the world frame, set this False to rotate it in.
         self.declare_parameter('odom_twist_in_body_frame', True)
-        # topic names (override to match your Isaac Sim action graphs)
-        self.declare_parameter('joint_states_topic', 'joint_states')
-        self.declare_parameter('imu_topic', 'imu')
-        self.declare_parameter('odom_topic', 'odom')
-        self.declare_parameter('cmd_vel_topic', 'cmd_vel')
-        self.declare_parameter('joint_command_topic', 'joint_command')
+        # topic-name parameters are derived from TOPIC_SOURCES + PUBLISHERS so adding a new sensor
+        # is a one-line registry edit rather than a copy/paste here.
+        for entry in self.TOPIC_SOURCES + self.PUBLISHERS:
+            self.declare_parameter(entry['param'], entry['default'])
         self.set_parameters(
             [rclpy.parameter.Parameter('use_sim_time', rclpy.Parameter.Type.BOOL, True)]
         )
@@ -120,24 +176,56 @@ class FullbodyController(Node):
             durability=rclpy.qos.DurabilityPolicy.VOLATILE,
             history=rclpy.qos.HistoryPolicy.KEEP_ALL,
         )
+        # qos label -> concrete QoS used by both registries
+        qos_map = {"sim": sim_qos_profile, "default": 10}
 
-        self._joint_publisher = self.create_publisher(
-            JointState, self.get_parameter('joint_command_topic').value, qos_profile=sim_qos_profile)
+        # ---- publishers (from PUBLISHERS registry) ---------------------------------------------------
+        for entry in self.PUBLISHERS:
+            topic = self.get_parameter(entry['param']).value
+            pub = self.create_publisher(entry['msg_type'], topic, qos_profile=qos_map[entry['qos']])
+            setattr(self, entry['attr'], pub)
 
-        # async caches (slow-changing / command inputs — no need to time-sync these)
-        self._cmd_vel = Twist()
-        self._odom_lin_vel_w = np.zeros(3)  # base linear velocity as reported by /odom
-        self.create_subscription(
-            Twist, self.get_parameter('cmd_vel_topic').value, self._cmd_vel_callback, qos_profile=10)
-        self.create_subscription(
-            Odometry, self.get_parameter('odom_topic').value, self._odom_callback, qos_profile=sim_qos_profile)
+        # ---- topic source caches (seeded so producers do not see NoneType before first message) ----
+        self._init_topic_caches()
 
-        # joint_states + imu must be temporally aligned -> synchronize them
-        self._joint_states_sub = Subscriber(
-            self, JointState, self.get_parameter('joint_states_topic').value, qos_profile=sim_qos_profile)
-        self._imu_sub = Subscriber(
-            self, Imu, self.get_parameter('imu_topic').value, qos_profile=sim_qos_profile)
-        self.sync = TimeSynchronizer([self._joint_states_sub, self._imu_sub], 10)
+        # ---- subscriptions (from TOPIC_SOURCES registry) --------------------------------------------
+        # Walk the registry: 'tick' sources go into one TimeSynchronizer driving the control loop;
+        # 'async' sources get a normal subscription that writes to a cache. Async sources whose
+        # ``feeds_terms`` tuple is set are SKIPPED when none of those obs terms appear in the
+        # loaded descriptor -- so adding optional sensors does not cost anything until a policy
+        # actually consumes them.
+        tick_subs = []
+        for entry in self.TOPIC_SOURCES:
+            if entry['mode'] == 'async' and entry['feeds_terms'] is not None:
+                if not any(t in self._obs_term_names for t in entry['feeds_terms']):
+                    self._logger.info(
+                        f"skipping subscription for '{entry['key']}': descriptor has no terms "
+                        f"in {tuple(entry['feeds_terms'])}.")
+                    continue
+            topic = self.get_parameter(entry['param']).value
+            if not topic:
+                detail = (f" (required by descriptor terms {entry['feeds_terms']})"
+                          if entry['feeds_terms'] is not None else " (always required)")
+                raise RuntimeError(
+                    f"topic source '{entry['key']}' is enabled but parameter '{entry['param']}' "
+                    f"is empty{detail}. Pass a topic name at launch, e.g. "
+                    f"-p {entry['param']}:=/your/topic.")
+            qos = qos_map[entry['qos']]
+            if entry['mode'] == 'tick':
+                sub = Subscriber(self, entry['msg_type'], topic, qos_profile=qos)
+                tick_subs.append(sub)
+                setattr(self, f"_{entry['key']}_sub", sub)
+            else:  # async
+                cb = getattr(self, entry['callback'])
+                self.create_subscription(entry['msg_type'], topic, cb, qos_profile=qos)
+
+        if not tick_subs:
+            raise RuntimeError(
+                "No 'tick' mode entries in TOPIC_SOURCES: the controller has no input to drive "
+                "the control loop and will never run.")
+        # NOTE: _tick's positional args bind to tick_subs in registry order (joint_states, imu).
+        # If you add a third tick source, update _tick's signature.
+        self.sync = TimeSynchronizer(tick_subs, 10)
         self.sync.registerCallback(self._tick)
 
         # ---- runtime state --------------------------------------------------------------------------
@@ -227,6 +315,20 @@ class FullbodyController(Node):
             f"Loaded IO descriptors from {desc_path}: "
             f"obs terms = {[t['name'] for t in self.obs_terms]}")
 
+    # ---- topic source caches -----------------------------------------------------------------------
+
+    def _init_topic_caches(self):
+        """Seed cache attributes that obs producers may read before the first message arrives.
+
+        Add one line here for every async ``TOPIC_SOURCES`` entry whose callback writes to
+        ``self.<attr>``. Initialising up-front avoids ``AttributeError`` on the first tick if
+        the policy starts running before the sensor publishes.
+        """
+        self._cmd_vel = Twist()
+        self._odom_lin_vel_w = np.zeros(3)  # base linear velocity as reported by /odom
+        # Extension caches (initialise alongside each new TOPIC_SOURCES entry):
+        # self._lidar_scan = None
+
     # ---- callbacks ---------------------------------------------------------------------------------
 
     def _cmd_vel_callback(self, msg: Twist):
@@ -240,6 +342,10 @@ class FullbodyController(Node):
 
     def _tick(self, joint_state: JointState, imu: Imu):
         """Run one control step from synchronized joint state + IMU.
+
+        The argument list is positional and bound to the order of ``TOPIC_SOURCES`` entries
+        with ``mode='tick'`` (today: joint_states, then imu). If a third tick source is added,
+        update this signature.
 
         On startup, hold/ease the robot into the policy's default joint pose for ``warmup_sec``
         so the first real observation is in-distribution, then engage the policy.
