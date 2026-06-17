@@ -218,6 +218,15 @@ class RewardsCfg:
         },
     )
 
+    trot_gait = RewTerm(
+        func=mdp.trot_gait_symmetry,
+        weight=0.2,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"]),
+            "command_name": "base_velocity",
+        },
+    )
+
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.5,

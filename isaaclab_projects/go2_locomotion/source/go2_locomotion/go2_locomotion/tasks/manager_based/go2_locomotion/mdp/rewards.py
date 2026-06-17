@@ -103,3 +103,49 @@ def stand_still_joint_deviation_l1(
     command = env.command_manager.get_command(command_name)
     # Penalize motion when command is nearly zero.
     return mdp.joint_deviation_l1(env, asset_cfg) * (torch.norm(command[:, :2], dim=1) < command_threshold)
+
+
+
+
+def trot_gait_symmetry(
+    env: ManagerBasedRLEnv, command_name: str, sensor_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Reward trotting gait where diagonal leg pairs move together.
+    
+    For a quadruped trot gait:
+    - Diagonal pair 1: FL (front-left) + RR (rear-right) should be in sync
+    - Diagonal pair 2: FR (front-right) + RL (rear-left) should be in sync
+    
+    Rewards when diagonal pairs have the same contact state (both in air or both on ground)
+    and penalizes when they are out of sync.
+    
+    Assumes body_ids order: [FL_foot, FR_foot, RL_foot, RR_foot] (indices 0, 1, 2, 3)
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    
+    # Get current contact state (True if in contact with ground)
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    in_contact = contact_time > 0.0  # shape: (num_envs, 4)
+    
+    # Diagonal pairs for trot gait:
+    # Pair 1: FL (idx 0) and RR (idx 3)
+    # Pair 2: FR (idx 1) and RL (idx 2)
+    fl_contact = in_contact[:, 0]
+    fr_contact = in_contact[:, 1]
+    rl_contact = in_contact[:, 2]
+    rr_contact = in_contact[:, 3]
+    
+    # Reward when diagonal pairs are synchronized (both same state)
+    pair1_sync = (fl_contact == rr_contact).float()  # FL and RR in sync
+    pair2_sync = (fr_contact == rl_contact).float()  # FR and RL in sync
+    
+    # Additionally reward when the two pairs are in opposite states (true trot)
+    pairs_opposite = (fl_contact != fr_contact).float()
+    
+    # Combine rewards
+    reward = pair1_sync + pair2_sync + pairs_opposite
+    
+    # Only apply when robot is moving
+    reward *= torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
+    
+    return reward
