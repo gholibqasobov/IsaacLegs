@@ -36,3 +36,10 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class G1_29DOF_PPORunnerCfg(PPORunnerCfg):
+    """PPO runner for the 29-DOF G1; separate experiment name to keep checkpoints distinct."""
+
+    experiment_name = "isaaclegs_g1_29dof_locomotion_ppo"
