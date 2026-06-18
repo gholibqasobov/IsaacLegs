@@ -1,7 +1,16 @@
+from pathlib import Path
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg, DCMotorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
+
+# Repo root, resolved relative to this file so the asset path is independent of
+# the current working directory the sim/training script is launched from.
+_REPO_ROOT = Path(__file__).resolve().parents[6]
+G1_29DOF_USD_PATH = str(
+    _REPO_ROOT / "src/robots/g1_description/usd/g1_29dof_rev_1_0/g1_29dof_rev_1_0/g1_29dof_rev_1_0.usd"
+)
 
 
 G1_CFG = ArticulationCfg(
@@ -113,7 +122,7 @@ G1_CFG = ArticulationCfg(
 
 G1_29DOF_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"src/robots/g1_description/usd/g1_29dof_rev_1_0/g1_29dof_rev_1_0/g1_29dof_rev_1_0.usd",
+        usd_path=G1_29DOF_USD_PATH,
         activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -244,18 +253,6 @@ G1_29DOF_CFG = ArticulationCfg(
                 ".*_elbow_.*": 0.001,
                 ".*_wrist_.*_joint": 0.001,
             },
-        ),
-        "hands": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_index_.*",
-                ".*_middle_.*",
-                ".*_thumb_.*",
-            ],
-            effort_limit=300,
-            velocity_limit=100,
-            stiffness=20,
-            damping=2,
-            armature=0.001,
         ),
     },
     prim_path="/World/envs/env_.*/Robot",
