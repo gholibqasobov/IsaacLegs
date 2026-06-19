@@ -20,7 +20,14 @@
 
   <!-- robot_center is the URDF root — matches /dog_odom child_frame_id so no static TF node needed.
        robot_state_publisher publishes robot_center->base_link automatically.
-       Full chain at runtime: odom -> robot_center -> base_link -> pelvis -> ... -->
+       Full chain at runtime: odom -> robot_center -> base_link -> pelvis -> ...
+
+       [ISAAC LAB] The two dummy ROS frames below (robot_center, base_link) are
+       commented out for the Isaac Lab USD import so that `pelvis` becomes the
+       articulation root. These fixed, zero-offset links are coincident with
+       pelvis, so removing them does not change any physical frame — they are
+       only needed for the ROS TF tree. UNCOMMENT this block before using the
+       URDF for ROS deployment.
   <link name="robot_center"/>
 
   <joint name="robot_center_to_base_link" type="fixed">
@@ -36,7 +43,8 @@
     <parent link="base_link"/>
     <child link="pelvis"/>
   </joint>
-  
+  -->
+
 
   <link name="pelvis">
     <inertial>
