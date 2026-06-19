@@ -123,7 +123,7 @@ G1_CFG = ArticulationCfg(
 G1_29DOF_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=G1_29DOF_USD_PATH,
-        activate_contact_sensors=False,
+        activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             retain_accelerations=False,
@@ -141,12 +141,16 @@ G1_29DOF_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.75),
-        rot=(0.7071, 0, 0, 0.7071),
+        pos=(0.0, 0.0, 0.74),
         joint_pos={
-            ".*_hip_pitch_joint": -0.10,
-            ".*_knee_joint": 0.30,
-            ".*_ankle_pitch_joint": -0.20,
+            ".*_hip_pitch_joint": -0.20,
+            ".*_knee_joint": 0.42,
+            ".*_ankle_pitch_joint": -0.23,
+            ".*_elbow_joint": 0.87,
+            "left_shoulder_roll_joint": 0.16,
+            "left_shoulder_pitch_joint": 0.35,
+            "right_shoulder_roll_joint": -0.16,
+            "right_shoulder_pitch_joint": 0.35,
         },
         joint_vel={".*": 0.0},
     ),
@@ -172,15 +176,15 @@ G1_29DOF_CFG = ArticulationCfg(
                 ".*_knee_joint": 20.0,
             },
             stiffness={
-                ".*_hip_yaw_joint": 100.0,
-                ".*_hip_roll_joint": 100.0,
-                ".*_hip_pitch_joint": 100.0,
+                ".*_hip_yaw_joint": 150.0,
+                ".*_hip_roll_joint": 150.0,
+                ".*_hip_pitch_joint": 200.0,
                 ".*_knee_joint": 200.0,
             },
             damping={
-                ".*_hip_yaw_joint": 2.5,
-                ".*_hip_roll_joint": 2.5,
-                ".*_hip_pitch_joint": 2.5,
+                ".*_hip_yaw_joint": 5.0,
+                ".*_hip_roll_joint": 5.0,
+                ".*_hip_pitch_joint": 5.0,
                 ".*_knee_joint": 5.0,
             },
             armature={
@@ -196,8 +200,8 @@ G1_29DOF_CFG = ArticulationCfg(
                 ".*_ankle_roll_joint": 20.0,
             },
             damping={
-                ".*_ankle_pitch_joint": 0.2,
-                ".*_ankle_roll_joint": 0.1,
+                ".*_ankle_pitch_joint": 2.0,
+                ".*_ankle_roll_joint": 2.0,
             },
             effort_limit={
                 ".*_ankle_pitch_joint": 50.0,
@@ -225,14 +229,14 @@ G1_29DOF_CFG = ArticulationCfg(
                 "waist_pitch_joint": 37.0,
             },
             stiffness={
-                "waist_yaw_joint": 5000.0,
-                "waist_roll_joint": 5000.0,
-                "waist_pitch_joint": 5000.0,
+                "waist_yaw_joint": 200.0,
+                "waist_roll_joint": 200.0,
+                "waist_pitch_joint": 200.0,
             },
             damping={
-                "waist_yaw_joint": 5.0,
-                "waist_roll_joint": 5.0,
-                "waist_pitch_joint": 5.0,
+                "waist_yaw_joint": 10.0,
+                "waist_roll_joint": 10.0,
+                "waist_pitch_joint": 10.0,
             },
             armature=0.001,
         ),
@@ -246,7 +250,7 @@ G1_29DOF_CFG = ArticulationCfg(
             ],
             effort_limit=300,
             velocity_limit=100,
-            stiffness=3000.0,
+            stiffness=40.0,
             damping=10.0,
             armature={
                 ".*_shoulder_.*": 0.001,

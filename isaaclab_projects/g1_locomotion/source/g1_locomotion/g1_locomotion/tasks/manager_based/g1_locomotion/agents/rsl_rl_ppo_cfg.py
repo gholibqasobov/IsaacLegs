@@ -5,7 +5,14 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+    RslRlSymmetryCfg,
+)
+
+from ..mdp.symmetry import g1_29dof as g1_29dof_symmetry
 
 
 @configclass
@@ -40,6 +47,17 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 @configclass
 class G1_29DOF_PPORunnerCfg(PPORunnerCfg):
-    """PPO runner for the 29-DOF G1; separate experiment name to keep checkpoints distinct."""
+    """PPO runner for the 29-DOF G1; separate experiment name to keep checkpoints distinct.
+
+    Enables left-right symmetry data augmentation so both legs are forced to learn
+    identical behavior (fixes the emergent limping gait on a physically symmetric robot).
+    """
 
     experiment_name = "isaaclegs_g1_29dof_locomotion_ppo"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            data_augmentation_func=g1_29dof_symmetry.compute_symmetric_states,
+        )

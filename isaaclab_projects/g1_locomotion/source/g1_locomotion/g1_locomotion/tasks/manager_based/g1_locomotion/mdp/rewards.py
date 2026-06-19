@@ -43,7 +43,7 @@ def feet_air_time_positive_biped(env, command_name: str, threshold: float, senso
     # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
-    air_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]
     contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
 
     in_contact = contact_time > 0.0
