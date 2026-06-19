@@ -23,6 +23,16 @@ The exact joint order, default positions, action scaling and per-term observatio
 are loaded from Isaac Lab's ``IO_descriptors.yaml`` (produced when the env is trained or
 exported with ``export_io_descriptors=True``), so this node is robot-agnostic for any
 policy whose observation terms are listed in ``OBS_PRODUCERS`` below.
+
+The action side supports one OR MORE joint-position action terms (e.g. a whole-body
+policy that splits "legs" and "upper_body" into separate terms with different scales).
+The policy network emits a single flat action vector whose layout is the concatenation
+of the terms in descriptor order; each term owns a contiguous slice, its own joint set,
+per-joint offset and scale. A single-term policy is simply the N=1 case.
+
+The observation joint order is taken from each joint-based obs term's own ``joint_names``
+(typically the articulation order) and is therefore decoupled from the action joint
+order -- the two need not match.
 """
 
 import io
@@ -51,7 +61,9 @@ class FullbodyController(Node):
     # ``self.obs_terms`` in order, calls the producer for each, and concatenates.
     #
     # To add a new obs term:
-    #   1. Write an ``_obs_<name>(self, ctx)`` method that returns a 1-D np.ndarray.
+    #   1. Write an ``_obs_<name>(self, ctx, term)`` method that returns a 1-D np.ndarray.
+    #      ``ctx`` carries the per-tick inputs; ``term`` is the term's descriptor entry
+    #      (its ``shape`` and, for joint-based terms, ``joint_names``/``offsets``).
     #   2. Add the ``name -> method_name`` mapping below.
     #   3. If the term needs a NEW topic, add a matching entry to TOPIC_SOURCES (see below).
     # Unknown term names fail fast at startup with the available registry keys in the error.
@@ -230,8 +242,8 @@ class FullbodyController(Node):
 
         # ---- runtime state --------------------------------------------------------------------------
         self._joint_command = JointState()
-        self._previous_action = np.zeros(self.num_joints)
-        self.action = np.zeros(self.num_joints)
+        self._previous_action = np.zeros(self.num_actions)
+        self.action = np.zeros(self.num_actions)
         self._policy_counter = 0
         # warmup state: ease the robot into the default pose before engaging the policy
         self._first_tick_time = None
@@ -239,9 +251,9 @@ class FullbodyController(Node):
         self._warmed_up = self._warmup_sec <= 0.0
 
         self._logger.info(
-            f"FullbodyController ready: {self.num_joints} joints, obs_dim={self.obs_dim}, "
-            f"action_scale={self.action_scale}, decimation={self._decimation}, "
-            f"warmup_sec={self._warmup_sec}")
+            f"FullbodyController ready: {self.num_actions} actuated joints across "
+            f"{len(self.action_groups)} action term(s), obs_dim={self.obs_dim}, "
+            f"decimation={self._decimation}, warmup_sec={self._warmup_sec}")
 
     # ---- loading -----------------------------------------------------------------------------------
 
@@ -256,8 +268,8 @@ class FullbodyController(Node):
         """Load joint order / defaults / scaling / obs layout from Isaac Lab's IO_descriptors.yaml.
 
         Expects the layout produced by ``scripts/environments/export_IODescriptors.py``:
-        a single ``actions`` entry (JointPositionAction) plus an ``observations.policy`` list
-        whose ``shape`` entries sum to the policy's observation dimension.
+        one or more ``actions`` entries (JointPositionAction) plus an ``observations.policy``
+        list whose ``shape`` entries sum to the policy's observation dimension.
         """
         desc_path = self.get_parameter('io_descriptors_path').value
         if not desc_path:
@@ -271,16 +283,56 @@ class FullbodyController(Node):
         with open(desc_path, 'r') as f:
             desc = yaml.safe_load(f)
 
-        # ---- action term ----
+        # ---- action terms ----
+        # Flatten one or more joint-position action terms into action-ordered vectors
+        # (joint names / default pose / per-joint scale) and remember each term's slice of
+        # the flat action vector. The terms are non-overlapping and concatenated in
+        # descriptor order, which is exactly the layout the policy network emits.
         actions = desc.get('actions') or []
         if not actions:
             raise ValueError(f"No 'actions' entries found in {desc_path}.")
-        # The deployed policy is single-headed: one joint-position action term.
-        action = actions[0]
-        self.joint_names = list(action['joint_names'])
-        self.num_joints = len(self.joint_names)
-        self.default_pos = np.array(action['offset'], dtype=np.float64)
-        self.action_scale = float(action['scale'])
+
+        self.action_groups = []
+        self.actuated_joint_names = []
+        offsets, scales = [], []
+        cursor = 0
+        for term in actions:
+            names = list(term['joint_names'])
+            n = len(names)
+            offset = np.asarray(term['offset'], dtype=np.float64).reshape(-1)
+            if offset.size != n:
+                raise ValueError(
+                    f"action term '{term.get('name')}' lists {n} joints but {offset.size} "
+                    f"offsets in {desc_path}.")
+            raw_scale = term.get('scale', 1.0)
+            scale = (np.full(n, float(raw_scale)) if np.isscalar(raw_scale)
+                     else np.asarray(raw_scale, dtype=np.float64).reshape(-1))
+            if scale.size != n:
+                raise ValueError(
+                    f"action term '{term.get('name')}' lists {n} joints but {scale.size} "
+                    f"scale entries in {desc_path}.")
+            if term.get('clip') is not None:
+                self._logger.warning(
+                    f"action term '{term.get('name')}' defines a non-null 'clip' which this "
+                    "controller does not apply; raw policy actions are used unclipped.")
+            self.action_groups.append(
+                {'name': term.get('name'), 'joint_names': names,
+                 'slice': slice(cursor, cursor + n)})
+            self.actuated_joint_names.extend(names)
+            offsets.append(offset)
+            scales.append(scale)
+            cursor += n
+
+        dupes = sorted({n for n in self.actuated_joint_names
+                        if self.actuated_joint_names.count(n) > 1})
+        if dupes:
+            raise ValueError(
+                f"action terms in {desc_path} actuate overlapping joints {dupes}; the "
+                "controller cannot resolve which term drives them.")
+
+        self.num_actions = cursor
+        self.default_pos = np.concatenate(offsets) if offsets else np.zeros(0)
+        self.action_scale_vec = np.concatenate(scales) if scales else np.zeros(0)
 
         # ---- observation layout ----
         # observations is a dict keyed by group name; the policy group is what the actor consumes.
@@ -293,7 +345,8 @@ class FullbodyController(Node):
         for term in policy_obs:
             name = term['name']
             shape = list(term['shape'])
-            history_length = int((term.get('overloads') or {}).get('history_length', 0))
+            overloads = term.get('overloads') or {}
+            history_length = int(overloads.get('history_length', 0) or 0)
             if history_length > 0:
                 raise NotImplementedError(
                     f"observation term '{name}' uses history_length={history_length}; this "
@@ -304,15 +357,32 @@ class FullbodyController(Node):
                     f"No observation producer registered for term '{name}' "
                     f"(descriptor: {desc_path}). Known terms: {sorted(self.OBS_PRODUCERS)}. "
                     "Add a producer method and an OBS_PRODUCERS entry, or fix the descriptor.")
-            self.obs_terms.append({'name': name, 'shape': shape, 'history_length': history_length})
+            entry = {
+                'name': name,
+                'shape': shape,
+                'history_length': history_length,
+                # post-producer transforms applied generically in _compute_observation
+                'scale': overloads.get('scale'),
+                'clip': overloads.get('clip'),
+            }
+            # Joint-based terms carry their OWN joint order + per-joint offsets, which are
+            # generally the articulation order and need not match the action joint order.
+            if 'joint_names' in term:
+                entry['joint_names'] = list(term['joint_names'])
+            for off_key in ('joint_pos_offsets', 'joint_vel_offsets'):
+                if off_key in term:
+                    entry['offsets'] = np.asarray(term[off_key], dtype=np.float64).reshape(-1)
+                    break
+            self.obs_terms.append(entry)
 
         self._obs_term_names = {t['name'] for t in self.obs_terms}
         self.obs_dim = sum(int(t['shape'][0]) for t in self.obs_terms)
 
-        # map a joint name -> its index in the policy's observation/action order
-        self._name_to_policy_idx = {name: i for i, name in enumerate(self.joint_names)}
+        # map a joint name -> its index in the flat action vector (for warmup pose mapping)
+        self._name_to_action_idx = {name: i for i, name in enumerate(self.actuated_joint_names)}
         self._logger.info(
             f"Loaded IO descriptors from {desc_path}: "
+            f"{len(self.action_groups)} action term(s) over {self.num_actions} joints, "
             f"obs terms = {[t['name'] for t in self.obs_terms]}")
 
     # ---- topic source caches -----------------------------------------------------------------------
@@ -359,8 +429,8 @@ class FullbodyController(Node):
             elapsed = (now - self._first_tick_time).nanoseconds * 1e-9
             if elapsed < self._warmup_sec:
                 # hold last_action at zero so the policy's first obs sees a clean reset state
-                self.action = np.zeros(self.num_joints)
-                self._previous_action = np.zeros(self.num_joints)
+                self.action = np.zeros(self.num_actions)
+                self._previous_action = np.zeros(self.num_actions)
                 if self._warmup_interp and self._warmup_start_pos is not None:
                     alpha = min(elapsed / self._warmup_sec, 1.0)
                     target = (1.0 - alpha) * self._warmup_start_pos + alpha * self.default_pos
@@ -372,24 +442,25 @@ class FullbodyController(Node):
             self._logger.info("Warmup complete; engaging policy.")
 
         self.forward(joint_state, imu)
-        # JointPositionActionCfg: target = default + scale * action
-        self._publish(self.default_pos + self.action * self.action_scale)
+        # JointPositionActionCfg: target = default + scale * action (per-joint scale vector,
+        # so multi-term policies with different per-term scales apply correctly).
+        self._publish(self.default_pos + self.action * self.action_scale_vec)
 
     def _publish(self, positions: np.ndarray):
-        """Publish a joint-position target in the policy's joint order."""
+        """Publish a joint-position target in the (flattened) action joint order."""
         self._joint_command.header.stamp = self.get_clock().now().to_msg()
-        self._joint_command.name = self.joint_names
+        self._joint_command.name = self.actuated_joint_names
         self._joint_command.position = positions.tolist()
-        self._joint_command.velocity = np.zeros(self.num_joints).tolist()
-        self._joint_command.effort = np.zeros(self.num_joints).tolist()
+        self._joint_command.velocity = np.zeros(self.num_actions).tolist()
+        self._joint_command.effort = np.zeros(self.num_actions).tolist()
         self._joint_publisher.publish(self._joint_command)
 
     def _map_joint_pos(self, joint_state: JointState) -> np.ndarray:
-        """Map an incoming ``joint_states`` message into policy joint order (by name)."""
+        """Map an incoming ``joint_states`` message into the flat action joint order (by name)."""
         joint_pos = self.default_pos.copy()
         for src_idx, name in enumerate(joint_state.name):
-            dst = self._name_to_policy_idx.get(name)
-            if dst is not None:
+            dst = self._name_to_action_idx.get(name)
+            if dst is not None and src_idx < len(joint_state.position):
                 joint_pos[dst] = joint_state.position[src_idx]
         return joint_pos
 
@@ -414,17 +485,19 @@ class FullbodyController(Node):
         cmd_vel = np.array(
             [self._cmd_vel.linear.x, self._cmd_vel.linear.y, self._cmd_vel.angular.z])
 
-        # map incoming joint_states (any order) into the policy's joint order
-        joint_pos = self._map_joint_pos(joint_state)
-        joint_vel = np.zeros(self.num_joints)
+        # Index measured joint state by name; each joint-based obs producer then selects and
+        # orders the joints it needs (the obs joint order may differ from the action order).
+        joint_pos_by_name, joint_vel_by_name = {}, {}
         for src_idx, name in enumerate(joint_state.name):
-            dst = self._name_to_policy_idx.get(name)
-            if dst is not None and src_idx < len(joint_state.velocity):
-                joint_vel[dst] = joint_state.velocity[src_idx]
+            if src_idx < len(joint_state.position):
+                joint_pos_by_name[name] = joint_state.position[src_idx]
+            if src_idx < len(joint_state.velocity):
+                joint_vel_by_name[name] = joint_state.velocity[src_idx]
 
         return SimpleNamespace(
             R_BW=R_BW, lin_vel_b=lin_vel_b, ang_vel_b=ang_vel_b, gravity_b=gravity_b,
-            cmd_vel=cmd_vel, joint_pos=joint_pos, joint_vel=joint_vel,
+            cmd_vel=cmd_vel,
+            joint_pos_by_name=joint_pos_by_name, joint_vel_by_name=joint_vel_by_name,
         )
 
     def _compute_observation(self, joint_state: JointState, imu: Imu) -> np.ndarray:
@@ -433,7 +506,15 @@ class FullbodyController(Node):
         parts = []
         for term in self.obs_terms:
             method = getattr(self, self.OBS_PRODUCERS[term['name']])
-            part = np.asarray(method(ctx), dtype=np.float64).reshape(-1)
+            part = np.asarray(method(ctx, term), dtype=np.float64).reshape(-1)
+            # apply descriptor overloads (scale then clip) generically, so any term that
+            # was trained with scaling/clipping is reproduced without bespoke code.
+            scale = term.get('scale')
+            if scale is not None:
+                part = part * np.asarray(scale, dtype=np.float64)
+            clip = term.get('clip')
+            if clip is not None:
+                part = np.clip(part, clip[0], clip[1])
             expected = int(term['shape'][0])
             if part.size != expected:
                 raise RuntimeError(
@@ -444,25 +525,42 @@ class FullbodyController(Node):
 
     # ---- observation producers (one per OBS_PRODUCERS entry) ---------------------------------------
 
-    def _obs_base_lin_vel(self, ctx):
+    def _obs_base_lin_vel(self, ctx, term):
         return ctx.lin_vel_b
 
-    def _obs_base_ang_vel(self, ctx):
+    def _obs_base_ang_vel(self, ctx, term):
         return ctx.ang_vel_b
 
-    def _obs_projected_gravity(self, ctx):
+    def _obs_projected_gravity(self, ctx, term):
         return ctx.gravity_b
 
-    def _obs_generated_commands(self, ctx):
+    def _obs_generated_commands(self, ctx, term):
         return ctx.cmd_vel
 
-    def _obs_joint_pos_rel(self, ctx):
-        return ctx.joint_pos - self.default_pos
+    def _obs_joint_names(self, term):
+        """Joint order for a joint-based obs term: the term's own list, else action order."""
+        return term.get('joint_names') or self.actuated_joint_names
 
-    def _obs_joint_vel_rel(self, ctx):
-        return ctx.joint_vel
+    def _obs_joint_pos_rel(self, ctx, term):
+        names = self._obs_joint_names(term)
+        # offsets default: the term's own offsets; else action defaults if the term is in
+        # action order (no joint_names listed); else zeros (unknown order -> raw rel).
+        offsets = term.get('offsets')
+        if offsets is None:
+            offsets = self.default_pos if term.get('joint_names') is None else np.zeros(len(names))
+        pos = np.array([ctx.joint_pos_by_name.get(n, offsets[k]) for k, n in enumerate(names)],
+                       dtype=np.float64)
+        return pos - offsets
 
-    def _obs_last_action(self, ctx):
+    def _obs_joint_vel_rel(self, ctx, term):
+        names = self._obs_joint_names(term)
+        offsets = term.get('offsets')
+        if offsets is None:
+            offsets = np.zeros(len(names))
+        vel = np.array([ctx.joint_vel_by_name.get(n, 0.0) for n in names], dtype=np.float64)
+        return vel - offsets
+
+    def _obs_last_action(self, ctx, term):
         return self._previous_action
 
     def _compute_action(self, obs: np.ndarray) -> np.ndarray:
@@ -476,7 +574,13 @@ class FullbodyController(Node):
         """Compute a new action every ``decimation`` ticks; hold it otherwise."""
         obs = self._compute_observation(joint_state, imu)
         if self._policy_counter % self._decimation == 0:
-            self.action = self._compute_action(obs)
+            action = self._compute_action(obs)
+            if action.size != self.num_actions:
+                raise RuntimeError(
+                    f"policy network returned {action.size} actions but the IO descriptor's "
+                    f"action terms sum to {self.num_actions}. The policy and "
+                    "IO_descriptors.yaml are likely from different training runs.")
+            self.action = action
             self._previous_action = self.action.copy()
         self._policy_counter += 1
 

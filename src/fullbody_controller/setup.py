@@ -19,6 +19,8 @@ setup(
         (f'share/{package_name}/policy/go2_locomotion',
             glob('policy/go2_locomotion/*')),
         (f'share/{package_name}/launch', glob('launch/*.launch.py')),
+        (f'share/{package_name}/policy/g1_29dof_locomotion',
+            glob('policy/g1_29dof_locomotion/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
