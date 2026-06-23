@@ -20,6 +20,24 @@ The controller is designed to work with different robot platforms through ROS 2 
 
 ---
 
+## Guides
+
+- [How to train a policy](docs/training.md) — train in Isaac Lab and export the deployable artifacts.
+- [How to create a digital twin](docs/digital_twin.md) — import the robot, set drive gains, wire the ROS 2 action graphs.
+- [How to use the policy controller for a custom robot](docs/custom_robot_controller.md) — use general controller to deploy your policy.
+
+## Roadmap
+- Locomotion policy training in Isaac Lab (Go2, G1, G1 29-DOF) ✅
+- Ready-to-use ROS 2 digital twins in Isaac Sim ✅
+- Robot-agnostic policy controller ✅
+- Onboard sensor integration (camera, 3D LiDAR) ✅
+- Deployment into stock NVIDIA simulation environments ✅
+- RViz configuration for all robots
+- SLAM and navigation
+- Imitation learning projects
+
+---
+
 ## Gallery
 
 Policies trained in Isaac Lab, and deployed in Isaac Sim digital twins across different
@@ -204,21 +222,6 @@ Published by the simulation (action graphs):
 | `/rgb`, `/depth` | `sensor_msgs/Image` | 
 | `/scan`, `/point_cloud` | `sensor_msgs/{LaserScan,PointCloud2}` | 
 ---
-
-<!-- ## Guides
-
-- [How to train a policy](docs/training.md) — train in Isaac Lab and export the deployable artifacts.
-- [How to create a digital twin](docs/digital_twin.md) — import the robot, set drive gains, wire the ROS 2 action graphs.
-- [How to use the policy controller for a custom robot](docs/custom_robot_controller.md) — the `IO_descriptors` contract, the extension points, adding sensors. -->
-
----
-
-<!-- ## Roadmap
-
-- `standalone_ros` and `standalone_direct` deployment modes (scripted/headless sim, and
-  in-process inference without ROS).
-- RViz configuration for the Go2.
-- More robots and environments. -->
 
 ## Contributing & feedback
 
