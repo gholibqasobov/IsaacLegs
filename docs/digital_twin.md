@@ -142,6 +142,11 @@ documentation for the full node reference:
 
 ## 4. Verify the twin
 
+> Enable the **ROS 2 bridge** extension in Isaac Sim (**Window → Extensions**, search for
+> `isaacsim.ros2.bridge` and enable it — tick *Autoload* to have it on at every startup). Without it,
+> no topics are published even while the timeline plays. `launch_scene.py` enables the bridge for
+> you; you only need to do this manually when building a scene from scratch.
+
 > Note: If a flat plane was added for testing (e.g., Create → Environments → Flat Grid), delete it after setup. The environment is created automatically by launch_scene.py
 
 ```bash
