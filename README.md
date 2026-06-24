@@ -96,6 +96,14 @@ A complete run consists of the **digital twin** in Isaac Sim and the **policy co
 ```bash
 git clone https://github.com/gholibqasobov/IsaacLegs.git ~/IsaacLegs
 cd ~/IsaacLegs
+
+# Install ROS 2 package dependencies 
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y
+
+# The policy controller runs a TorchScript policy
+pip install torch
+
 colcon build --symlink-install
 source install/setup.bash          # re-run in every new shell
 ```
